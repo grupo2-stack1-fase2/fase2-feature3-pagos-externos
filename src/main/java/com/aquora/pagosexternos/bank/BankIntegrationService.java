@@ -58,19 +58,20 @@ public class BankIntegrationService {
 
         } catch (FeignException e) {
             int status = e.status();
-            String codigo = extraerCodigo(e.contentUTF8());
+            String bodyError = e.contentUTF8();
+            String codigo = extraerCodigo(bodyError);
             Long retryAfterMillis = extraerRetryAfterMillis(e);
 
             if (status == 400 || status == 403 || status == 422) {
-                log.error("[Banco] {} no reintentable corr={} codigo={}", status, correlationId, codigo);
+                log.error("[Banco] {} no reintentable corr={} codigo={} body={}", status, correlationId, codigo, bodyError);
                 return BankSendOutcome.rechazadoDefinitivo(status, codigo);
             }
             if (REINTENTABLES.contains(status)) {
-                log.warn("[Banco] {} reintentable corr={} codigo={} retryAfterMs={}", status, correlationId, codigo, retryAfterMillis);
+                log.warn("[Banco] {} reintentable corr={} codigo={} retryAfterMs={} body={}", status, correlationId, codigo, retryAfterMillis, bodyError);
                 return BankSendOutcome.reintentar(status, codigo, retryAfterMillis);
             }
             // Status no previsto: por seguridad, se trata como reintentable.
-            log.warn("[Banco] status no previsto {} corr={}, se trata como reintentable", status, correlationId);
+            log.warn("[Banco] status no previsto {} corr={} body={}, se trata como reintentable", status, correlationId, bodyError);
             return BankSendOutcome.reintentar(status, codigo, null);
 
         } catch (Exception e) {

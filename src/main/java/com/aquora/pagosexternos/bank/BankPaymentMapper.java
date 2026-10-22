@@ -6,6 +6,8 @@ import com.aquora.pagosexternos.bank.dto.BankAmountDto;
 import com.aquora.pagosexternos.bank.dto.BankPayerDto;
 import com.aquora.pagosexternos.bank.dto.BankPaymentRequestDto;
 import com.aquora.pagosexternos.model.Pago;
+import com.aquora.pagosexternos.repository.ClienteInfoRepository;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -18,7 +20,10 @@ import java.time.OffsetDateTime;
  * Ver seccion 7 de la guia "API Bancos" para el detalle de cada campo.
  */
 @Component
+@RequiredArgsConstructor
 public class BankPaymentMapper {
+
+    private final ClienteInfoRepository clienteInfoRepository;
 
     /** Prefijo de equipo. Cambiar segun el equipo asignado (EQA, EQB, EQC o EQD). */
     private static final String PREFIJO_IDEMPOTENCIA = "EQA";
@@ -40,9 +45,13 @@ public class BankPaymentMapper {
         req.setTeamCode(BankPaymentRequestDto.TeamCodeEnum.fromValue(TEAM_CODE));
 
         BankPayerDto payer = new BankPayerDto();
-        // TODO: confirmar con el esquema real de AQUORA de donde sale el
-        // codigo/nombre/NIT del cliente (join con la tabla clientes via lectura_id).
         payer.setCustomerCode("CLI-" + String.format("%04d", pago.getLecturaId()));
+        // Nombre real del cliente (via lecturas -> contadores -> clientes). El banco
+        // acepta hasta 150 caracteres; taxId no existe en el esquema de AQUORA y
+        // es opcional en el contrato, por eso se deja sin llenar.
+        clienteInfoRepository.buscarNombreClientePorPago(pago.getId())
+                .ifPresent(nombre -> payer.setFullName(
+                        nombre.length() > 150 ? nombre.substring(0, 150) : nombre));
         req.setPayer(payer);
 
         BankAmountDto amount = new BankAmountDto();

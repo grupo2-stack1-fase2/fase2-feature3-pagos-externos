@@ -18,8 +18,6 @@ Mapeo con el diagrama de clase:
 
 ## Pasos para arrancar hoy
 
-**Requisitos:** JDK 25 LTS y Maven 3.9 o posterior.
-
 ### 1. Preparar la base de datos
 Abre tu AQUORA local en DBeaver (o donde administres tu MariaDB) y ejecuta el script:
 ```

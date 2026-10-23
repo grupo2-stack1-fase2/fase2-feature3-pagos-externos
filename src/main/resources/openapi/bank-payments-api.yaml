@@ -1,0 +1,237 @@
+openapi: 3.0.3
+info:
+  title: bankPaymentsSimulator
+  version: 1.0.0
+  description: >
+    Simulador de banco (API Gateway + Lambda + DynamoDB) para la Fase 2.
+    IMPORTANTE: este archivo es un borrador reconstruido a partir de la guia
+    "API Bancos - Guia de integracion (Feature 3)" entregada por Bryan/el
+    docente. EN CUANTO LLEGUE EL bank-payments-api.yaml REAL DEL DOCENTE,
+    reemplazar este archivo completo por el real y volver a correr
+    `mvn clean compile`. No modificar este archivo a mano salvo para eso.
+servers:
+  - url: https://REEMPLAZAR_API_ID.execute-api.us-east-1.amazonaws.com/prod
+tags:
+  - name: Bank
+paths:
+  /bank/v1/payments:
+    post:
+      operationId: sendBankPayment
+      tags: [Bank]
+      summary: Registrar un pago en el banco
+      parameters:
+        - in: header
+          name: x-api-key
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 64
+            pattern: '^[A-Za-z0-9_-]+$'
+        - in: header
+          name: X-Correlation-Id
+          required: false
+          schema:
+            type: string
+        - in: header
+          name: X-Simulation-Scenario
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankPaymentRequest'
+      responses:
+        '201':
+          description: Pago registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankPaymentReceipt'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '403':
+          description: Team mismatch / API key invalida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '409':
+          description: Pago duplicado o llave de idempotencia reutilizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankDuplicateError'
+        '422':
+          description: Monto fuera de rango, fecha futura o canal no soportado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '502':
+          description: Error API Gateway <-> Lambda
+        '503':
+          description: Servicio no disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+        '504':
+          description: Timeout de API Gateway
+  /bank/v1/payments/{idempotencyKey}:
+    get:
+      operationId: getBankPayment
+      tags: [Bank]
+      summary: Reconciliar un pago por su llave de idempotencia
+      parameters:
+        - in: path
+          name: idempotencyKey
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: x-api-key
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: El pago existe
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankPaymentReceipt'
+        '404':
+          description: PAYMENT_NOT_FOUND
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankError'
+  /bank/v1/health:
+    get:
+      operationId: getBankHealth
+      tags: [Bank]
+      summary: Verificar disponibilidad del banco
+      responses:
+        '200':
+          description: OK
+components:
+  schemas:
+    BankPaymentRequest:
+      type: object
+      required: [teamCode, payer, amount, transactionDate, channel]
+      properties:
+        teamCode:
+          type: string
+          enum: [EQUIPO_A, EQUIPO_B, EQUIPO_C, EQUIPO_D]
+        payer:
+          $ref: '#/components/schemas/BankPayer'
+        amount:
+          $ref: '#/components/schemas/BankAmount'
+        transactionDate:
+          type: string
+          format: date-time
+        channel:
+          type: string
+          enum: [CASH, CARD, BANK_TRANSFER, CHECK]
+        description:
+          type: string
+          maxLength: 140
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+    BankPayer:
+      type: object
+      required: [customerCode]
+      properties:
+        customerCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+        fullName:
+          type: string
+          maxLength: 150
+        taxId:
+          type: string
+          maxLength: 20
+    BankAmount:
+      type: object
+      required: [valueInCents, currency]
+      properties:
+        valueInCents:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 99999999
+        currency:
+          type: string
+          enum: [GTQ]
+    BankPaymentReceipt:
+      type: object
+      properties:
+        receiptId:
+          type: string
+        idempotencyKey:
+          type: string
+        teamCode:
+          type: string
+        status:
+          type: string
+          enum: [ACCEPTED]
+        amount:
+          $ref: '#/components/schemas/BankAmount'
+        receivedAt:
+          type: string
+          format: date-time
+        valueDate:
+          type: string
+          format: date
+    BankError:
+      type: object
+      properties:
+        status:
+          type: integer
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+        correlationId:
+          type: string
+        details:
+          type: array
+          items:
+            type: string
+    BankDuplicateError:
+      allOf:
+        - $ref: '#/components/schemas/BankError'
+        - type: object
+          properties:
+            originalReceipt:
+              $ref: '#/components/schemas/BankPaymentReceipt'

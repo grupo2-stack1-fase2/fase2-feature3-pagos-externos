@@ -25,9 +25,6 @@ public class BankIntegrationService {
 
     private final BankFeignClient bankApi;
 
-    @Value("${app.bank.api-key}")
-    private String apiKey;
-
     @Value("${app.bank.team-code:EQUIPO_A}")
     private String teamCode;
 
@@ -37,9 +34,11 @@ public class BankIntegrationService {
     public BankSendOutcome enviar(BankPaymentRequestDto request, String idempotencyKey) {
         String correlationId = UUID.randomUUID().toString();
         try {
-            // Orden real: x-api-key, Idempotency-Key, body, X-Correlation-Id, X-Simulation-Scenario
+            // El contrato oficial modela x-api-key como securityScheme (no como
+            // parametro del metodo): BankFeignConfig lo inyecta via RequestInterceptor.
+            // Firma real: Idempotency-Key, body, X-Correlation-Id, X-Simulation-Scenario.
             ResponseEntity<BankPaymentReceiptDto> respuesta = bankApi.sendBankPayment(
-                    apiKey, idempotencyKey, request, correlationId, null
+                    idempotencyKey, request, correlationId, null
             );
             BankPaymentReceiptDto receipt = respuesta.getBody();
             String receiptId = receipt == null ? null : receipt.getReceiptId();

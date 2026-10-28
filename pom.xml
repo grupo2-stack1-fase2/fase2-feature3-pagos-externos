@@ -156,16 +156,30 @@
                             </configOptions>
                         </configuration>
                     </execution>
-                    <!--
-                      Cuando llegue el contrato del ERP (erp-payments-api.yaml), agregar aqui
-                      una segunda <execution> igual a esta, cambiando:
-                        - id: erp-client
-                        - inputSpec: .../openapi/erp-payments-api.yaml
-                        - apiPackage: com.aquora.pagosexternos.erp.client
-                        - modelPackage: com.aquora.pagosexternos.erp.dto
-                      Es justo lo que explico el profe en clase: dos plugins (ejecuciones),
-                      uno por API externa, dentro del mismo pom.
-                    -->
+                    <execution>
+                        <id>erp-client</id>
+                        <phase>generate-sources</phase>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                        <configuration>
+                            <inputSpec>${project.basedir}/src/main/resources/openapi/erp-payments-api.yaml</inputSpec>
+                            <generatorName>spring</generatorName>
+                            <library>spring-cloud</library>
+                            <output>${project.build.directory}/generated-sources/openapi-erp</output>
+                            <apiPackage>com.aquora.pagosexternos.erp.client</apiPackage>
+                            <modelPackage>com.aquora.pagosexternos.erp.dto</modelPackage>
+                            <modelNameSuffix>Dto</modelNameSuffix>
+                            <skipValidateSpec>false</skipValidateSpec>
+                            <configOptions>
+                                <useSpringBoot3>true</useSpringBoot3>
+                                <useBeanValidation>true</useBeanValidation>
+                                <openApiNullable>false</openApiNullable>
+                                <dateLibrary>java8</dateLibrary>
+                                <interfaceOnly>true</interfaceOnly>
+                            </configOptions>
+                        </configuration>
+                    </execution>
                 </executions>
             </plugin>
         </plugins>

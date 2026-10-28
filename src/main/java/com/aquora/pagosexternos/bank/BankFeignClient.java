@@ -12,6 +12,6 @@ import org.springframework.cloud.openfeign.FeignClient;
  * @RequestHeader / @RequestBody que trae BankApi, así que con solo extenderla
  * ya queda funcionando como cliente Feign real.
  */
-@FeignClient(name = "bankApi", url = "${app.bank.base-url}")
+@FeignClient(name = "bankApi", url = "${app.bank.base-url}", configuration = BankFeignConfig.class)
 public interface BankFeignClient extends BankApi {
 }

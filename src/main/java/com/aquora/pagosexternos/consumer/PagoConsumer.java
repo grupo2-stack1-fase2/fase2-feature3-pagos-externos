@@ -5,6 +5,10 @@ import com.aquora.pagosexternos.bank.BankPaymentMapper;
 import com.aquora.pagosexternos.bank.BankSendOutcome;
 import com.aquora.pagosexternos.bank.dto.BankPaymentRequestDto;
 import com.aquora.pagosexternos.dto.PagoMessage;
+import com.aquora.pagosexternos.erp.ErpIntegrationService;
+import com.aquora.pagosexternos.erp.ErpPaymentMapper;
+import com.aquora.pagosexternos.erp.ErpSendOutcome;
+import com.aquora.pagosexternos.erp.dto.ErpRegistroPagoDto;
 import com.aquora.pagosexternos.model.EnvioDestino;
 import com.aquora.pagosexternos.model.Pago;
 import com.aquora.pagosexternos.repository.EnvioDestinoRepository;
@@ -22,8 +26,8 @@ import java.util.Optional;
 
 /**
  * Este es el "consumer" del diagrama: toma el mensaje de la cola y llama a cada
- * destino externo (por ahora, solo el banco; el ERP queda como TODO cuando llegue
- * su contrato). Al final actualiza el flag en la tabla pagos (lo que en el diagrama
+ * destino externo (banco y ERP, ambos con contrato oficial del docente desde el
+ * 8/10). Al final actualiza el flag en la tabla pagos (lo que en el diagrama
  * hace la "Lambda Function": marcar el pago como enviado o fallido).
  *
  * CAMBIO IMPORTANTE respecto a la version anterior (con BancoSimulado):
@@ -44,6 +48,8 @@ public class PagoConsumer {
     private final EnvioDestinoRepository envioDestinoRepository;
     private final BankPaymentMapper bankPaymentMapper;
     private final BankIntegrationService bankIntegrationService;
+    private final ErpPaymentMapper erpPaymentMapper;
+    private final ErpIntegrationService erpIntegrationService;
 
     @RabbitListener(queues = "${app.rabbitmq.queue}")
     @Transactional
@@ -63,9 +69,8 @@ public class PagoConsumer {
         }
 
         boolean bancoOk = procesarDestinoBanco(pago);
-        // TODO cuando llegue el contrato del ERP: boolean erpOk = procesarDestinoErp(pago);
-        // y abajo, enviado = bancoOk && erpOk. Por ahora solo depende del banco.
-        boolean todosExitosos = bancoOk;
+        boolean erpOk = procesarDestinoErp(pago);
+        boolean todosExitosos = bancoOk && erpOk;
         boolean algunoFallidoDefinitivo = huboFallidoDefinitivo(pago.getId());
 
         if (todosExitosos) {
@@ -135,6 +140,65 @@ public class PagoConsumer {
                 }
                 envioDestinoRepository.save(envio);
                 log.warn("Pago {} -> BANCO fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Procesa (o salta, si ya esta EXITOSO) el destino ERP para este pago.
+     * Mismo patron que procesarDestinoBanco: idempotencia por destino via
+     * envios_banco (banco='ERP'), y un rechazo definitivo manda el mensaje
+     * completo a la DLQ de inmediato (no tiene sentido seguir reintentando
+     * el banco si el ERP ya dijo que el pago esta mal formado, por ejemplo).
+     * @return true si el ERP ya confirmo el pago (hoy o en un intento anterior).
+     */
+    private boolean procesarDestinoErp(Pago pago) {
+        EnvioDestino envio = envioDestinoRepository
+                .findByPagoIdAndDestino(pago.getId(), EnvioDestino.Destino.ERP.name())
+                .orElseGet(() -> new EnvioDestino(
+                        pago.getId(),
+                        EnvioDestino.Destino.ERP,
+                        erpPaymentMapper.numeroDocumentoParaPago(pago)
+                ));
+
+        if (envio.esExitoso()) {
+            log.info("Pago {} -> ERP ya estaba EXITOSO, se salta.", pago.getId());
+            return true;
+        }
+        if (envio.esFallidoDefinitivo()) {
+            log.info("Pago {} -> ERP ya quedo FALLIDO_DEFINITIVO, no se reintenta.", pago.getId());
+            return false;
+        }
+
+        ErpRegistroPagoDto request = erpPaymentMapper.aErpRegistroPago(pago);
+        ErpSendOutcome resultado = erpIntegrationService.enviar(request);
+
+        envio.setIntentos(envio.getIntentos() + 1);
+        envio.setUltimoHttpStatus(resultado.httpStatus);
+        envio.setUltimoCodigoError(resultado.codigoError);
+
+        switch (resultado.tipo) {
+            case EXITOSO -> {
+                envio.marcarExitoso(resultado.numeroComprobante);
+                envioDestinoRepository.save(envio);
+                return true;
+            }
+            case RECHAZADO_DEFINITIVO -> {
+                envio.marcarFallidoDefinitivo("HTTP " + resultado.httpStatus + " " + resultado.codigoError);
+                envioDestinoRepository.save(envio);
+                throw new AmqpRejectAndDontRequeueException(
+                        "Pago " + pago.getId() + " rechazado definitivamente por ERP: " + resultado.codigoError);
+            }
+            default -> { // REINTENTAR
+                if (envio.getIntentos() >= MAX_INTENTOS_POR_DESTINO) {
+                    envio.marcarFallidoDefinitivo("Agoto " + MAX_INTENTOS_POR_DESTINO + " intentos. Ultimo: HTTP " + resultado.httpStatus + " " + resultado.codigoError);
+                    envioDestinoRepository.save(envio);
+                    log.error("Pago {} -> ERP agoto los {} intentos.", pago.getId(), MAX_INTENTOS_POR_DESTINO);
+                    return false;
+                }
+                envioDestinoRepository.save(envio);
+                log.warn("Pago {} -> ERP fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
                 return false;
             }
         }

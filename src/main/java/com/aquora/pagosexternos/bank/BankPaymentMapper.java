@@ -1,9 +1,12 @@
 package com.aquora.pagosexternos.bank;
 
-// Nombres confirmados el 22/10 corriendo `mvn clean compile` real contra el
-// YAML de src/main/resources/openapi/bank-payments-api.yaml.
-import com.aquora.pagosexternos.bank.dto.BankAmountDto;
-import com.aquora.pagosexternos.bank.dto.BankPayerDto;
+// Nombres confirmados el 28/10 generando con el YAML OFICIAL del docente
+// (src/main/resources/openapi/bank-payments-api.yaml). El borrador reconstruido
+// que se uso antes nombraba estos esquemas BankPayer/BankAmount; el contrato
+// real los llama simplemente Payer/Money -> PayerDto/MoneyDto.
+import com.aquora.pagosexternos.bank.dto.MoneyDto;
+import com.aquora.pagosexternos.bank.dto.PayerDto;
+import com.aquora.pagosexternos.bank.dto.TeamCodeDto;
 import com.aquora.pagosexternos.bank.dto.BankPaymentRequestDto;
 import com.aquora.pagosexternos.model.Pago;
 import com.aquora.pagosexternos.repository.ClienteInfoRepository;
@@ -42,9 +45,9 @@ public class BankPaymentMapper {
 
     public BankPaymentRequestDto aBankPaymentRequest(Pago pago) {
         BankPaymentRequestDto req = new BankPaymentRequestDto();
-        req.setTeamCode(BankPaymentRequestDto.TeamCodeEnum.fromValue(TEAM_CODE));
+        req.setTeamCode(TeamCodeDto.fromValue(TEAM_CODE));
 
-        BankPayerDto payer = new BankPayerDto();
+        PayerDto payer = new PayerDto();
         payer.setCustomerCode("CLI-" + String.format("%04d", pago.getLecturaId()));
         // Nombre real del cliente (via lecturas -> contadores -> clientes). El banco
         // acepta hasta 150 caracteres; taxId no existe en el esquema de AQUORA y
@@ -54,9 +57,9 @@ public class BankPaymentMapper {
                         nombre.length() > 150 ? nombre.substring(0, 150) : nombre));
         req.setPayer(payer);
 
-        BankAmountDto amount = new BankAmountDto();
+        MoneyDto amount = new MoneyDto();
         amount.setValueInCents(aCentavos(pago.getMonto()));
-        amount.setCurrency(BankAmountDto.CurrencyEnum.GTQ);
+        amount.setCurrency(MoneyDto.CurrencyEnum.GTQ);
         req.setAmount(amount);
 
         req.setTransactionDate(

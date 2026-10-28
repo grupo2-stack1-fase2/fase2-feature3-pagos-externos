@@ -1,63 +1,271 @@
-# Feature 3 — Envío de pagos a sistemas externos
+Nombre: Bryan Josue Rivera Hernandez
+Carnet: 0905-23-1623
+Repositorio: https://github.com/grupo2-stack1-fase2/fase2-feature3-pagos-externos
+Modulo asignado: Envío de pagos a sistemas externos por colas
 
-Microservicio que toma pagos pendientes de la base de datos de AQUORA, los publica en una
-cola (RabbitMQ) y un consumidor los "envía" a 3 sistemas externos simulados (bancos),
-con reintentos e idempotencia.
+# Feature 3 — Envío de pagos a sistemas externos (AQUORA, Fase 2)
 
-Mapeo con el diagrama de clase:
+Microservicio que toma los pagos registrados en AQUORA y los notifica a dos sistemas
+externos (el banco y el ERP) de forma asíncrona, por colas, con idempotencia por destino
+y reintentos controlados para no duplicar pagos ya confirmados.
 
-| Diagrama | En este proyecto |
-|---|---|
-| MySQL replica | Tu MariaDB local de AQUORA (tabla `pagos` + 3 columnas nuevas) |
-| producer ("consulta pagos pendientes por medio de flag") | `PagoProducer` (clase programada cada 30s) |
-| cola | RabbitMQ (`docker-compose.yml`) |
-| consumer | `PagoConsumer` |
-| Bancos | `BancoSimulado` (simula 3 sistemas externos) |
-| Lambda Function ("flag pagos enviados a banco") | Lo hace el propio `PagoConsumer`, actualizando `estado_envio` en la tabla `pagos` |
-| DynamoDB Logs | Por ahora: logs normales en consola (`log.info`/`log.error`). Se puede agregar DynamoDB real más adelante si se confirma que es requisito — ver nota abajo. |
+> Este README documenta primero la arquitectura de la solución integrada completa de la
+> Fase 2 (según lo acordado con el equipo), y luego entra en detalle sobre este módulo en
+> particular.
 
-## Pasos para arrancar hoy
+---
 
-**Requisitos:** JDK 25 LTS y Maven 3.9 o posterior.
+## 1. Arquitectura de la solución integrada
 
-### 1. Preparar la base de datos
-Abre tu AQUORA local en DBeaver (o donde administres tu MariaDB) y ejecuta el script:
-```
-sql/agregar_columna_envio.sql
-```
-Esto solo agrega 3 columnas nuevas a la tabla `pagos` que ya tienes. No borra ni cambia nada del proyecto AQUORA.
+La solución de Fase 2 está formada por el **monolito heredado de AQUORA** (sin modificar)
+más **cuatro features nuevas**, cada una como un servicio independiente que se comunica con
+el monolito y/o con sistemas externos:
 
-Después, para tener algo que probar de inmediato, marca 1 o 2 pagos existentes como pendientes de envío (el script trae un ejemplo comentado al final).
+| Feature | Descripción | Repositorio |
+|---|---|---|
+| 1. Consulta pública con captcha | Consulta de facturación/estado de cuenta para clientes, protegida con captcha | _repo de otro integrante del equipo_ |
+| 2. Chatbot con RAG | Asistente conversacional con recuperación de contexto (RAG) sobre datos de AQUORA | _repo de otro integrante del equipo_ |
+| **3. Envío de pagos a sistemas externos por colas** | **Este repositorio.** Notifica cada pago al banco y al ERP vía colas, con idempotencia por destino | `fase2-feature3-pagos-externos` (este repo) |
+| 4. Replicación asíncrona a NoSQL/SQL | Replica cambios de AQUORA hacia una base de datos destino | _repo de otro integrante del equipo_ |
 
-### 2. Levantar RabbitMQ
-Con Docker Desktop corriendo:
+El monolito (CodeIgniter 3 / Laravel, según el componente) sigue siendo la única fuente de
+verdad para los datos de clientes, lecturas, tarifas y pagos — **no se modificó su código**.
+Cada feature nueva lee o escribe sobre la misma base de datos (`oficina_agua_db`) o expone su
+propia API, según corresponda, pero nunca reemplaza al monolito.
+
+### Diagrama de arquitectura
+
+![Diagrama de arquitectura de la solución integrada](docs/arquitectura.png)
+
+> **Nota de transparencia:** los bloques de las Features 1, 2 y 4 (marcados en el diagrama
+> con borde punteado rojo) se dibujaron de forma genérica a partir de la descripción del
+> enunciado de Fase 2, porque este módulo no tuvo acceso directo al código de esos
+> repositorios al momento de escribir esta documentación. El bloque de la **Feature 3**
+> (este repo), en cambio, sí refleja los componentes reales del código fuente. Si estos
+> otros módulos cambiaron su diseño, actualiza esa parte del diagrama antes de la entrega.
+
+Componentes que sí están confirmados contra el código de este repositorio:
+
+- **`PagoProducer`**: tarea programada (cada 5 segundos) que revisa en la tabla `pagos` los
+  registros con `estado_envio = 'pendiente'` y los publica en la cola.
+- **RabbitMQ** (`pagos.envio.queue`): cola de mensajes entre el productor y el consumidor,
+  con una **Dead Letter Queue** (`pagos.envio.dlq`) para los pagos que el banco rechaza de
+  forma definitiva.
+- **`PagoConsumer`**: orquesta el envío — revisa, **por cada destino** (banco y ERP), si el
+  pago ya fue resuelto para ese destino, llama a la API correspondiente, y decide si marcar
+  éxito, reintentar, o mandar a la DLQ. El pago solo se marca `enviado` cuando **ambos**
+  destinos confirman éxito.
+- **`BankPaymentMapper` + `ClienteInfoRepository`**: arman el request que espera el banco con
+  datos reales de AQUORA (nombre del cliente, monto en centavos, fecha, canal de pago).
+- **`BankIntegrationService` + `BankFeignClient`**: cliente HTTP real (Spring Cloud OpenFeign),
+  generado a partir del contrato OpenAPI oficial del banco, que clasifica cada respuesta según
+  el contrato (éxito / reintentable / rechazo definitivo).
+- **`ErpPaymentMapper`**: arma el request que espera el ERP (campos en español/snake_case,
+  monto como texto con 2 decimales, desglose `detalle[]` por rubro). AQUORA no desglosa el
+  pago por rubro, así que se manda una sola línea con `rubro = AGUA_POTABLE` por el monto
+  completo (ver decisión técnica en la sección 2.3).
+- **`ErpIntegrationService` + `ErpFeignClient`**: cliente HTTP real, generado a partir del
+  contrato OpenAPI oficial del ERP, con la misma lógica de clasificación que el banco pero
+  adaptada a los códigos de error propios del ERP (`DOCUMENTO_DUPLICADO`,
+  `DOCUMENTO_REUTILIZADO`, etc.).
+- **Tabla `envios_banco`**: registro de idempotencia por (pago, destino) — una fila por cada
+  combinación `(pago, BANCO)` y `(pago, ERP)`, evita reenviar un pago que ya fue confirmado
+  por ese destino.
+- **APIs externas del banco y del ERP**: ambas expuestas por AWS API Gateway (según el
+  contrato oficial entregado por el docente), consumidas por HTTPS con autenticación
+  `x-api-key` y una llave de idempotencia estable por pago (header en el banco, campo del
+  body en el ERP).
+
+### Cómo se ejecuta la solución
+
+Este repositorio levanta su propia infraestructura con Docker Compose:
+
 ```bash
 docker compose up -d
 ```
-Verifica en el navegador: http://localhost:15672 (usuario `guest`, contraseña `guest`). Ahí vas a ver la cola `pagos.envio.queue` una vez que arranque la aplicación.
 
-### 3. Ajustar `application.properties`
-Revisa `src/main/resources/application.properties`:
-- `spring.datasource.url` — cambia el nombre de la base (`aquora`) si en tu Laragon se llama distinto.
-- `spring.datasource.username` / `password` — igual que como te conectas en DBeaver.
+Esto levanta **RabbitMQ** (puertos `5672` para la app y `15672` para el panel de
+administración, usuario/contraseña `guest`/`guest`). La base de datos de AQUORA
+(`oficina_agua_db`, MariaDB/MySQL) se asume que ya existe de forma local (la misma que usa
+el monolito) — este microservicio no la crea ni la administra, solo le agrega columnas
+nuevas mediante los scripts de `sql/`.
 
-### 4. Correr la aplicación
+> La ejecución del monolito y de las otras tres features sigue el procedimiento descrito en
+> sus propios repositorios; no se documenta aquí porque este módulo no tiene control sobre
+> ellos.
+
+---
+
+## 2. Mi módulo: Envío de pagos a sistemas externos por colas
+
+### 2.1 Funcionalidad y objetivo
+
+AQUORA necesita que cada pago que un cliente hace por el servicio de agua quede también
+reflejado en el **banco** con el que opera la oficina y en su **ERP** (sistema contable
+interno), sin intervención manual. El problema de negocio real que resuelve este módulo es
+evitar que, si la comunicación con alguno de esos dos sistemas falla a medias (timeout,
+caída de red), el pago se registre dos veces en el destino que falló — algo que un reintento
+ingenuo causaría fácilmente.
+
+Este microservicio:
+
+1. Detecta pagos pendientes de notificar en la base de datos de AQUORA.
+2. Los encola de forma asíncrona (RabbitMQ) para no bloquear la operación normal del
+   monolito.
+3. Llama a la API real del banco **y** a la API real del ERP, cada una con su propio cliente
+   Feign generado desde su contrato OpenAPI oficial.
+4. Garantiza **idempotencia por pago + destino**: antes de reenviar a un destino, revisa si
+   ese pago ya fue confirmado específicamente por ese destino (el banco puede haber
+   confirmado y el ERP todavía no, o viceversa).
+5. Clasifica cada respuesta de cada destino (éxito, reintentable, o rechazo definitivo) y
+   actúa en consecuencia — incluyendo una Dead Letter Queue para los rechazos que no tiene
+   sentido reintentar. El pago solo se marca `enviado` cuando **ambos** destinos confirman.
+
+### 2.2 Integración y responsabilidades
+
+- **El monolito de AQUORA no se modifica.** Este microservicio solo le agrega 3 columnas de
+  control (`estado_envio`, `fecha_envio`, `intentos_envio`) a la tabla `pagos` que ya existe,
+  vía migración SQL (`sql/agregar_columna_envio.sql`) — nunca toca su lógica ni su código.
+- **Se comunica con la base de datos de AQUORA directamente** (no a través de una API del
+  monolito), porque así se definió para esta feature: el productor lee pagos pendientes y el
+  consumidor actualiza su estado en la misma base compartida.
+- **Se comunica con el banco y con el ERP únicamente por HTTPS**, usando clientes Feign
+  generados desde los contratos OpenAPI oficiales que entregó el docente — nunca se
+  hardcodeó una llamada manual a ninguno de los dos.
+- **No expone las API keys** a ningún otro componente: se inyectan solo como variables de
+  entorno al arrancar este microservicio (`BANK_API_KEY`, `ERP_API_KEY`), nunca se commitean.
+- **Una tabla de seguimiento separada (`envios_banco`) en vez de sobrecargar `pagos`**: se
+  decidió así para poder registrar un intento por cada destino (banco y ERP) sin mezclar esa
+  información de control con los datos propios del pago.
+
+### 2.3 Decisión técnica relevante
+
+**Idempotencia por `(pago, destino)` en vez de solo por pago, usando una restricción
+`UNIQUE` en base de datos en lugar de solo lógica en el código.**
+
+Un mismo pago debe notificarse a dos sistemas externos independientes (banco y, a futuro,
+ERP), y cada uno puede confirmar en momentos distintos. Si la idempotencia se controlara solo
+por `pago_id`, confirmar en el banco bloquearía incorrectamente el envío al ERP (o viceversa).
+Por eso la tabla `envios_banco` tiene una fila por cada combinación de pago y destino, con una
+restricción `UNIQUE (pago_id, banco)` a nivel de base de datos:
+
+```sql
+UNIQUE KEY uq_envios_pago_banco (pago_id, banco)
+```
+
+Se eligió reforzar esto con una restricción de base de datos (no solo con un `if` en Java) por
+una razón concreta: si en el futuro hay más de una instancia de este microservicio corriendo
+al mismo tiempo (escalamiento horizontal), dos instancias podrían leer "no existe fila
+todavía" al mismo tiempo y ambas intentar insertar — la restricción `UNIQUE` evita ese caso
+límite de forma garantizada, mientras que una validación solo en memoria no lo evitaría.
+
+La alternativa considerada (una sola tabla con una columna `destino` compartida por todos los
+pagos pendientes, sin esa restricción) se descartó porque no ofrecía ninguna garantía real
+contra el envío duplicado en ese escenario de concurrencia.
+
+Adicionalmente, la `Idempotency-Key` que se envía al banco (header) y el
+`documento_origen.numero` que se envía al ERP (campo del body — el ERP no usa header para
+esto) se derivan **siempre del mismo esquema** a partir del `id` del pago (`EQA-000020`),
+nunca de un valor aleatorio. Así, aunque el mensaje se reintente varias veces, cada sistema
+externo siempre ve la misma clave para el mismo pago y puede detectar duplicados de su lado
+también (`409 DUPLICATE_PAYMENT` en el banco, `409 DOCUMENTO_DUPLICADO` en el ERP).
+
+**Una sola línea de `detalle[]` para el ERP, en vez de desglosar por rubro.**
+
+El contrato del ERP exige que cada pago venga con un desglose `detalle[]` (una línea por
+`rubro`: agua potable, reconexión, mora, etc.) cuya suma debe calzar exactamente con `total`.
+La tabla `pagos` de AQUORA, sin embargo, solo guarda un monto total por pago — el monolito no
+registra ese desglose por rubro. La alternativa habría sido inventar una regla de negocio
+para "adivinar" cómo repartir el monto entre rubros, pero eso introduciría datos que AQUORA
+nunca tuvo y que el equipo no tiene forma de validar contra la fuente real. Por eso se optó
+por la opción más honesta con los datos disponibles: una sola línea con
+`rubro = AGUA_POTABLE` por el monto completo del pago. Esto cumple el contrato (la suma de
+`detalle[]` sigue siendo igual a `total`) sin fabricar información que no existe en AQUORA.
+
+### 2.4 Instrucciones para probar el módulo
+
+**Requisitos previos:** JDK 25, Maven 3.9+, Docker (para RabbitMQ), y una base de datos
+MariaDB/MySQL local con el esquema de AQUORA ya restaurado (`oficina_agua_db`).
+
+**1. Preparar la base de datos** — ejecutar, en este orden, contra `oficina_agua_db`:
+
+```sql
+-- Si la tabla de control de pagos aun no existe:
+-- sql/agregar_columna_envio.sql
+-- sql/crear_envios_banco.sql
+-- sql/alterar_envios_banco_idempotencia.sql
+```
+
+**2. Levantar RabbitMQ:**
+
+```bash
+docker compose up -d
+```
+
+Panel de administración: http://localhost:15672 (usuario/contraseña `guest`/`guest`).
+
+**3. Definir las variables de entorno del banco y del ERP** (nunca se exponen credenciales
+reales aquí en el repositorio — usa las que entregó el docente el 8/10 junto con los
+contratos OpenAPI):
+
+```bash
+export BANK_BASE_URL="https://<api-id>.execute-api.us-east-1.amazonaws.com/prod"
+export BANK_API_KEY="<api-key-real-del-banco>"
+export ERP_BASE_URL="https://<api-id>.execute-api.us-east-1.amazonaws.com/prod"
+export ERP_API_KEY="<api-key-real-del-erp>"
+export TEAM_CODE="EQUIPO_A"
+```
+
+**4. Arrancar la aplicación** (en la misma terminal donde se definieron esas variables):
+
 ```bash
 mvn spring-boot:run
 ```
-(si no tienes Maven instalado, en IntelliJ basta con abrir el proyecto y correr `PagosExternosApplication`, el IDE trae su propio Maven).
 
-### 5. Probar el flujo
-- Swagger UI: http://localhost:8083/swagger-ui.html
-- Botón `POST /api/pagos-externos/procesar` → dispara la revisión de pendientes de inmediato (sin esperar los 30s).
-- `GET /api/pagos-externos/estado` → ver cómo cambia el estado de cada pago: `pendiente` → `en_cola` → `enviado` (o `fallido` tras 3 intentos).
-- En la consola vas a ver los logs del producer, el consumer, y los 3 "bancos" simulados.
+Confirmar en el log la línea `Started PagosExternosApplication in X seconds`, sin errores de
+conexión a MariaDB ni a RabbitMQ.
 
-### 6. Probar reintentos/fallo
-`BancoSimulado` simula ~80% de éxito al azar, así que si corres varias veces vas a ver también el caso donde falla y se reintenta, y eventualmente queda en `fallido` si falla 3 veces seguidas.
+**5. Flujo de prueba:**
 
-## Pendiente / próximos pasos
-- Documentar bien los endpoints en Swagger (ya está la base con `springdoc-openapi`, falta pulir descripciones).
-- Confirmar con el profe si realmente se requiere usar AWS DynamoDB para los logs y AWS Lambda literal, o si el diagrama es solo ilustrativo y vale con el equivalente actual (log en consola / base de datos). Si se requiere DynamoDB real, se puede agregar después sin tener que rehacer el producer/consumer — solo se cambiaría dónde se registra el log.
-- Agregar manejo de errores más robusto (hoy el fallo es simulado al azar, en la versión real podría ser una excepción de conexión).
-- Pruebas end-to-end (tarea ya listada en el backlog de Jira, Epic 19).
+- Insertar (o marcar) un pago existente con `estado_envio = 'pendiente'` en la tabla `pagos`.
+- Esperar hasta 5 segundos, o disparar la revisión manualmente:
+  `POST http://localhost:8083/api/pagos-externos/procesar`
+- Ver el estado de todos los pagos: `GET http://localhost:8083/api/pagos-externos/estado`
+- Ver solo los pendientes/fallidos: `GET http://localhost:8083/api/pagos-externos/estado/pendiente`
+- Documentación interactiva de estos endpoints: Swagger UI en
+  http://localhost:8083/swagger-ui.html
+- También existe una colección de Postman lista para importar en `postman/pagos-externos.postman_collection.json`.
+
+**Resultado esperado:** el pago pasa de `pendiente` → `en_cola` → `enviado` solo cuando
+**tanto el banco como el ERP** responden `201` (o su equivalente de "ya estaba entregado":
+`409 DUPLICATE_PAYMENT` en el banco, `409 DOCUMENTO_DUPLICADO` en el ERP). Si cualquiera de
+los dos rechaza el pago de forma definitiva (por ejemplo `400`/`422`), o agota los reintentos
+ante fallos transitorios, el pago queda `fallido`. En la tabla `envios_banco` debe quedar
+**una fila por cada destino** para ese `pago_id` (`banco = 'BANCO'` y `banco = 'ERP'`), cada
+una con su propio `estado`, `intentos`, y (si tuvo éxito) el comprobante real devuelto por
+ese sistema (`receipt_id` del banco, número de comprobante del ERP).
+
+> La integración con el banco ya se verificó en vivo contra su API real: un pago recibió
+> primero un `500` (reintentable), el sistema lo reintentó automáticamente, y en el segundo
+> intento el banco respondió `201` con un recibo real. La integración con el ERP (agregada
+> una vez que el docente entregó su contrato oficial, junto con el del banco, el 8/10)
+> compila limpio contra JDK 25 y sigue exactamente el mismo patrón ya probado del banco;
+> la prueba en vivo contra la API real del ERP queda pendiente de confirmar antes de la
+> entrega final (ver sección 2.5).
+
+### 2.5 Pendientes conocidos
+
+- **Prueba en vivo de la integración con el ERP**: el código compila y sigue el mismo patrón
+  ya verificado del banco, pero aún no se confirmó una ejecución real contra la API del ERP
+  (insertar un pago, ver `201`/reintento, y la fila correspondiente en `envios_banco` con
+  `banco = 'ERP'`). Hacerlo antes de la entrega final.
+- `payer.taxId` (banco) no se envía porque la tabla `clientes` de AQUORA no tiene columna de
+  NIT — es un campo opcional en el contrato del banco, así que no bloquea el envío. Lo mismo
+  aplica a `contribuyente.nit` en el ERP.
+- El campo `forma_pago` del ERP (y `channel` del banco) no tienen un valor exacto para el
+  método de pago `"deposito"` de AQUORA — se mapea a `TRANSFERENCIA`/`CARD` como la opción
+  más cercana, pendiente de confirmar con el docente (sección 10, pregunta 4 de la guía
+  original del banco).
+- Queda un archivo legado `BancoSimulado.java` sin usar, de la primera versión de este
+  módulo (antes de conectar con el banco real); no se elimina en esta entrega para no
+  arriesgar el historial de commits, pero ya no es parte del flujo activo.

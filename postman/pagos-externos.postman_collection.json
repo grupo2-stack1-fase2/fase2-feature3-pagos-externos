@@ -1,0 +1,233 @@
+{
+  "info": {
+    "_postman_id": "4d508d39-507f-4355-b5f2-40498ac995d1",
+    "name": "Feature 3 - Pagos Externos (AQUORA)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "56889163",
+    "_collection_link": "https://go.postman.co/collection/56889163-4d508d39-507f-4355-b5f2-40498ac995d1?source=collection_link"
+  },
+  "item": [
+    {
+      "name": "api",
+      "item": [
+        {
+          "name": "pagos-externos",
+          "item": [
+            {
+              "name": "procesar",
+              "item": [
+                {
+                  "name": "Dispara manualmente la revision de pagos pendientes, sin esperar los 30s del scheduler",
+                  "request": {
+                    "method": "POST",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "*/*"
+                      }
+                    ],
+                    "url": {
+                      "raw": "{{baseUrl}}/api/pagos-externos/procesar",
+                      "host": [
+                        "{{baseUrl}}"
+                      ],
+                      "path": [
+                        "api",
+                        "pagos-externos",
+                        "procesar"
+                      ]
+                    }
+                  },
+                  "response": [
+                    {
+                      "name": "OK",
+                      "originalRequest": {
+                        "method": "POST",
+                        "header": [
+                          {
+                            "key": "Accept",
+                            "value": "*/*"
+                          }
+                        ],
+                        "url": {
+                          "raw": "{{baseUrl}}/api/pagos-externos/procesar",
+                          "host": [
+                            "{{baseUrl}}"
+                          ],
+                          "path": [
+                            "api",
+                            "pagos-externos",
+                            "procesar"
+                          ]
+                        }
+                      },
+                      "status": "OK",
+                      "code": 200,
+                      "_postman_previewlanguage": "text",
+                      "header": [
+                        {
+                          "key": "Content-Type",
+                          "value": "*/*"
+                        }
+                      ],
+                      "cookie": [],
+                      "body": "string"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "estado",
+              "item": [
+                {
+                  "name": "{estado}",
+                  "item": [
+                    {
+                      "name": "Lista solo los pagos en un estado especifico, ej: /estado/pendiente",
+                      "request": {
+                        "method": "GET",
+                        "header": [
+                          {
+                            "key": "Accept",
+                            "value": "*/*"
+                          }
+                        ],
+                        "url": {
+                          "raw": "{{baseUrl}}/api/pagos-externos/estado/:estado",
+                          "host": [
+                            "{{baseUrl}}"
+                          ],
+                          "path": [
+                            "api",
+                            "pagos-externos",
+                            "estado",
+                            ":estado"
+                          ],
+                          "variable": [
+                            {
+                              "key": "estado",
+                              "value": "pendiente"
+                            }
+                          ]
+                        }
+                      },
+                      "response": [
+                        {
+                          "name": "OK",
+                          "originalRequest": {
+                            "method": "GET",
+                            "header": [
+                              {
+                                "key": "Accept",
+                                "value": "*/*"
+                              }
+                            ],
+                            "url": {
+                              "raw": "{{baseUrl}}/api/pagos-externos/estado/:estado",
+                              "host": [
+                                "{{baseUrl}}"
+                              ],
+                              "path": [
+                                "api",
+                                "pagos-externos",
+                                "estado",
+                                ":estado"
+                              ],
+                              "variable": [
+                                {
+                                  "key": "estado",
+                                  "value": "string"
+                                }
+                              ]
+                            }
+                          },
+                          "status": "OK",
+                          "code": 200,
+                          "_postman_previewlanguage": "text",
+                          "header": [
+                            {
+                              "key": "Content-Type",
+                              "value": "*/*"
+                            }
+                          ],
+                          "cookie": [],
+                          "body": "[\n  {\n    \"id\": 5837,\n    \"lecturaId\": 5814,\n    \"monto\": 8072.598083331272,\n    \"fechaPago\": \"1975-07-24T18:40:50.482Z\",\n    \"metodo\": \"string\",\n    \"usuarioRegistroId\": 8112,\n    \"estadoEnvio\": \"string\",\n    \"fechaEnvio\": \"2005-02-18T17:04:52.523Z\",\n    \"intentosEnvio\": 7830\n  },\n  {\n    \"id\": 5646,\n    \"lecturaId\": 810,\n    \"monto\": 4721.721507637962,\n    \"fechaPago\": \"1963-07-10T20:57:49.321Z\",\n    \"metodo\": \"string\",\n    \"usuarioRegistroId\": 7455,\n    \"estadoEnvio\": \"string\",\n    \"fechaEnvio\": \"2021-11-19T04:44:09.164Z\",\n    \"intentosEnvio\": 5951\n  }\n]"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "name": "Lista el estado de envio de todos los pagos (pendiente / en_cola / enviado / fallido)",
+                  "request": {
+                    "method": "GET",
+                    "header": [
+                      {
+                        "key": "Accept",
+                        "value": "*/*"
+                      }
+                    ],
+                    "url": {
+                      "raw": "{{baseUrl}}/api/pagos-externos/estado",
+                      "host": [
+                        "{{baseUrl}}"
+                      ],
+                      "path": [
+                        "api",
+                        "pagos-externos",
+                        "estado"
+                      ]
+                    }
+                  },
+                  "response": [
+                    {
+                      "name": "OK",
+                      "originalRequest": {
+                        "method": "GET",
+                        "header": [
+                          {
+                            "key": "Accept",
+                            "value": "*/*"
+                          }
+                        ],
+                        "url": {
+                          "raw": "{{baseUrl}}/api/pagos-externos/estado",
+                          "host": [
+                            "{{baseUrl}}"
+                          ],
+                          "path": [
+                            "api",
+                            "pagos-externos",
+                            "estado"
+                          ]
+                        }
+                      },
+                      "status": "OK",
+                      "code": 200,
+                      "_postman_previewlanguage": "text",
+                      "header": [
+                        {
+                          "key": "Content-Type",
+                          "value": "*/*"
+                        }
+                      ],
+                      "cookie": [],
+                      "body": "[\n  {\n    \"id\": 5837,\n    \"lecturaId\": 5814,\n    \"monto\": 8072.598083331272,\n    \"fechaPago\": \"1975-07-24T18:40:50.482Z\",\n    \"metodo\": \"string\",\n    \"usuarioRegistroId\": 8112,\n    \"estadoEnvio\": \"string\",\n    \"fechaEnvio\": \"2005-02-18T17:04:52.523Z\",\n    \"intentosEnvio\": 7830\n  },\n  {\n    \"id\": 5646,\n    \"lecturaId\": 810,\n    \"monto\": 4721.721507637962,\n    \"fechaPago\": \"1963-07-10T20:57:49.321Z\",\n    \"metodo\": \"string\",\n    \"usuarioRegistroId\": 7455,\n    \"estadoEnvio\": \"string\",\n    \"fechaEnvio\": \"2021-11-19T04:44:09.164Z\",\n    \"intentosEnvio\": 5951\n  }\n]"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8083"
+    }
+  ]
+}

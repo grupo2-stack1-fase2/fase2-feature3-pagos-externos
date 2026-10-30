@@ -19,6 +19,8 @@ import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import com.aquora.pagosexternos.logging.PagoLogDynamoService;
+
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -50,6 +52,7 @@ public class PagoConsumer {
     private final BankIntegrationService bankIntegrationService;
     private final ErpPaymentMapper erpPaymentMapper;
     private final ErpIntegrationService erpIntegrationService;
+    private final PagoLogDynamoService pagoLogDynamoService;
 
     @RabbitListener(queues = "${app.rabbitmq.queue}")
     @Transactional
@@ -93,57 +96,64 @@ public class PagoConsumer {
      * Procesa (o salta, si ya esta EXITOSO) el destino BANCO para este pago.
      * @return true si el banco ya confirmo el pago (hoy o en un intento anterior).
      */
-    private boolean procesarDestinoBanco(Pago pago) {
-        EnvioDestino envio = envioDestinoRepository
-                .findByPagoIdAndDestino(pago.getId(), EnvioDestino.Destino.BANCO.name())
-                .orElseGet(() -> new EnvioDestino(
-                        pago.getId(),
-                        EnvioDestino.Destino.BANCO,
-                        bankPaymentMapper.idempotencyKeyParaPago(pago)
-                ));
+        private boolean procesarDestinoBanco(Pago pago) {
+    EnvioDestino envio = envioDestinoRepository
+            .findByPagoIdAndDestino(pago.getId(), EnvioDestino.Destino.BANCO.name())
+            .orElseGet(() -> new EnvioDestino(
+                    pago.getId(),
+                    EnvioDestino.Destino.BANCO,
+                    bankPaymentMapper.idempotencyKeyParaPago(pago)
+            ));
 
-        if (envio.esExitoso()) {
-            log.info("Pago {} -> BANCO ya estaba EXITOSO, se salta.", pago.getId());
+    if (envio.esExitoso()) {
+        log.info("Pago {} -> BANCO ya estaba EXITOSO, se salta.", pago.getId());
+        return true;
+    }
+    if (envio.esFallidoDefinitivo()) {
+        log.info("Pago {} -> BANCO ya quedo FALLIDO_DEFINITIVO, no se reintenta.", pago.getId());
+        return false;
+    }
+
+    BankPaymentRequestDto request = bankPaymentMapper.aBankPaymentRequest(pago);
+    BankSendOutcome resultado = bankIntegrationService.enviar(request, envio.getIdempotencyKey());
+
+    envio.setIntentos(envio.getIntentos() + 1);
+    envio.setUltimoHttpStatus(resultado.httpStatus);
+    envio.setUltimoCodigoError(resultado.codigoError);
+
+    switch (resultado.tipo) {
+        case EXITOSO -> {
+            envio.marcarExitoso(resultado.receiptId);
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "BANCO", "EXITOSO",
+                    resultado.httpStatus, null, resultado.receiptId);
             return true;
         }
-        if (envio.esFallidoDefinitivo()) {
-            log.info("Pago {} -> BANCO ya quedo FALLIDO_DEFINITIVO, no se reintenta.", pago.getId());
-            return false;
+        case RECHAZADO_DEFINITIVO -> {
+            envio.marcarFallidoDefinitivo("HTTP " + resultado.httpStatus + " " + resultado.codigoError);
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "BANCO", "RECHAZADO_DEFINITIVO",
+                    resultado.httpStatus, resultado.codigoError, null);
+            throw new AmqpRejectAndDontRequeueException(
+                    "Pago " + pago.getId() + " rechazado definitivamente por BANCO: " + resultado.codigoError);
         }
-
-        BankPaymentRequestDto request = bankPaymentMapper.aBankPaymentRequest(pago);
-        BankSendOutcome resultado = bankIntegrationService.enviar(request, envio.getIdempotencyKey());
-
-        envio.setIntentos(envio.getIntentos() + 1);
-        envio.setUltimoHttpStatus(resultado.httpStatus);
-        envio.setUltimoCodigoError(resultado.codigoError);
-
-        switch (resultado.tipo) {
-            case EXITOSO -> {
-                envio.marcarExitoso(resultado.receiptId);
+        default -> { // REINTENTAR
+            if (envio.getIntentos() >= MAX_INTENTOS_POR_DESTINO) {
+                envio.marcarFallidoDefinitivo("Agoto " + MAX_INTENTOS_POR_DESTINO + " intentos. Ultimo: HTTP " + resultado.httpStatus + " " + resultado.codigoError);
                 envioDestinoRepository.save(envio);
-                return true;
-            }
-            case RECHAZADO_DEFINITIVO -> {
-                envio.marcarFallidoDefinitivo("HTTP " + resultado.httpStatus + " " + resultado.codigoError);
-                envioDestinoRepository.save(envio);
-                // No reintentable: a la DLQ de inmediato, sin gastar mas intentos (seccion 5.3 de la guia).
-                throw new AmqpRejectAndDontRequeueException(
-                        "Pago " + pago.getId() + " rechazado definitivamente por BANCO: " + resultado.codigoError);
-            }
-            default -> { // REINTENTAR
-                if (envio.getIntentos() >= MAX_INTENTOS_POR_DESTINO) {
-                    envio.marcarFallidoDefinitivo("Agoto " + MAX_INTENTOS_POR_DESTINO + " intentos. Ultimo: HTTP " + resultado.httpStatus + " " + resultado.codigoError);
-                    envioDestinoRepository.save(envio);
-                    log.error("Pago {} -> BANCO agoto los {} intentos.", pago.getId(), MAX_INTENTOS_POR_DESTINO);
-                    return false;
-                }
-                envioDestinoRepository.save(envio);
-                log.warn("Pago {} -> BANCO fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
+                pagoLogDynamoService.registrarLog(pago.getId(), "BANCO", "FALLIDO_DEFINITIVO_REINTENTOS",
+                        resultado.httpStatus, resultado.codigoError, null);
+                log.error("Pago {} -> BANCO agoto los {} intentos.", pago.getId(), MAX_INTENTOS_POR_DESTINO);
                 return false;
             }
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "BANCO", "REINTENTAR",
+                    resultado.httpStatus, resultado.codigoError, null);
+            log.warn("Pago {} -> BANCO fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
+            return false;
         }
     }
+}
 
     /**
      * Procesa (o salta, si ya esta EXITOSO) el destino ERP para este pago.
@@ -154,55 +164,63 @@ public class PagoConsumer {
      * @return true si el ERP ya confirmo el pago (hoy o en un intento anterior).
      */
     private boolean procesarDestinoErp(Pago pago) {
-        EnvioDestino envio = envioDestinoRepository
-                .findByPagoIdAndDestino(pago.getId(), EnvioDestino.Destino.ERP.name())
-                .orElseGet(() -> new EnvioDestino(
-                        pago.getId(),
-                        EnvioDestino.Destino.ERP,
-                        erpPaymentMapper.numeroDocumentoParaPago(pago)
-                ));
+    EnvioDestino envio = envioDestinoRepository
+            .findByPagoIdAndDestino(pago.getId(), EnvioDestino.Destino.ERP.name())
+            .orElseGet(() -> new EnvioDestino(
+                    pago.getId(),
+                    EnvioDestino.Destino.ERP,
+                    erpPaymentMapper.numeroDocumentoParaPago(pago)
+            ));
 
-        if (envio.esExitoso()) {
-            log.info("Pago {} -> ERP ya estaba EXITOSO, se salta.", pago.getId());
+    if (envio.esExitoso()) {
+        log.info("Pago {} -> ERP ya estaba EXITOSO, se salta.", pago.getId());
+        return true;
+    }
+    if (envio.esFallidoDefinitivo()) {
+        log.info("Pago {} -> ERP ya quedo FALLIDO_DEFINITIVO, no se reintenta.", pago.getId());
+        return false;
+    }
+
+    ErpRegistroPagoDto request = erpPaymentMapper.aErpRegistroPago(pago);
+    ErpSendOutcome resultado = erpIntegrationService.enviar(request);
+
+    envio.setIntentos(envio.getIntentos() + 1);
+    envio.setUltimoHttpStatus(resultado.httpStatus);
+    envio.setUltimoCodigoError(resultado.codigoError);
+
+    switch (resultado.tipo) {
+        case EXITOSO -> {
+            envio.marcarExitoso(resultado.numeroComprobante);
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "ERP", "EXITOSO",
+                    resultado.httpStatus, null, resultado.numeroComprobante);
             return true;
         }
-        if (envio.esFallidoDefinitivo()) {
-            log.info("Pago {} -> ERP ya quedo FALLIDO_DEFINITIVO, no se reintenta.", pago.getId());
-            return false;
+        case RECHAZADO_DEFINITIVO -> {
+            envio.marcarFallidoDefinitivo("HTTP " + resultado.httpStatus + " " + resultado.codigoError);
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "ERP", "RECHAZADO_DEFINITIVO",
+                    resultado.httpStatus, resultado.codigoError, null);
+            throw new AmqpRejectAndDontRequeueException(
+                    "Pago " + pago.getId() + " rechazado definitivamente por ERP: " + resultado.codigoError);
         }
-
-        ErpRegistroPagoDto request = erpPaymentMapper.aErpRegistroPago(pago);
-        ErpSendOutcome resultado = erpIntegrationService.enviar(request);
-
-        envio.setIntentos(envio.getIntentos() + 1);
-        envio.setUltimoHttpStatus(resultado.httpStatus);
-        envio.setUltimoCodigoError(resultado.codigoError);
-
-        switch (resultado.tipo) {
-            case EXITOSO -> {
-                envio.marcarExitoso(resultado.numeroComprobante);
+        default -> { // REINTENTAR
+            if (envio.getIntentos() >= MAX_INTENTOS_POR_DESTINO) {
+                envio.marcarFallidoDefinitivo("Agoto " + MAX_INTENTOS_POR_DESTINO + " intentos. Ultimo: HTTP " + resultado.httpStatus + " " + resultado.codigoError);
                 envioDestinoRepository.save(envio);
-                return true;
-            }
-            case RECHAZADO_DEFINITIVO -> {
-                envio.marcarFallidoDefinitivo("HTTP " + resultado.httpStatus + " " + resultado.codigoError);
-                envioDestinoRepository.save(envio);
-                throw new AmqpRejectAndDontRequeueException(
-                        "Pago " + pago.getId() + " rechazado definitivamente por ERP: " + resultado.codigoError);
-            }
-            default -> { // REINTENTAR
-                if (envio.getIntentos() >= MAX_INTENTOS_POR_DESTINO) {
-                    envio.marcarFallidoDefinitivo("Agoto " + MAX_INTENTOS_POR_DESTINO + " intentos. Ultimo: HTTP " + resultado.httpStatus + " " + resultado.codigoError);
-                    envioDestinoRepository.save(envio);
-                    log.error("Pago {} -> ERP agoto los {} intentos.", pago.getId(), MAX_INTENTOS_POR_DESTINO);
-                    return false;
-                }
-                envioDestinoRepository.save(envio);
-                log.warn("Pago {} -> ERP fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
+                pagoLogDynamoService.registrarLog(pago.getId(), "ERP", "FALLIDO_DEFINITIVO_REINTENTOS",
+                        resultado.httpStatus, resultado.codigoError, null);
+                log.error("Pago {} -> ERP agoto los {} intentos.", pago.getId(), MAX_INTENTOS_POR_DESTINO);
                 return false;
             }
+            envioDestinoRepository.save(envio);
+            pagoLogDynamoService.registrarLog(pago.getId(), "ERP", "REINTENTAR",
+                    resultado.httpStatus, resultado.codigoError, null);
+            log.warn("Pago {} -> ERP fallo (intento {}), se reintentara.", pago.getId(), envio.getIntentos());
+            return false;
         }
     }
+}
 
     private boolean huboFallidoDefinitivo(Long pagoId) {
         List<EnvioDestino> envios = envioDestinoRepository.findByPagoId(pagoId);

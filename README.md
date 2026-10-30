@@ -75,6 +75,12 @@ Componentes que sí están confirmados contra el código de este repositorio:
   contrato oficial entregado por el docente), consumidas por HTTPS con autenticación
   `x-api-key` y una llave de idempotencia estable por pago (header en el banco, campo del
   body en el ERP).
+- **`PagoLogDynamoService` + tabla DynamoDB `pagos_envio_logs`**: registra en AWS DynamoDB un
+  log de cada intento de envío (éxito o fallo) por pago y por destino — `pagoId`, `timestamp`,
+  `destino`, `resultado`, `httpStatus`, `codigoError` e `idExterno` (recibo/comprobante). Es un
+  log aditivo, independiente de la tabla `envios_banco` (que sigue siendo la única fuente de
+  verdad para la idempotencia): si la escritura en DynamoDB falla, se registra una advertencia
+  en el log de la aplicación pero **nunca bloquea ni revierte** el procesamiento del pago.
 
 ### Cómo se ejecuta la solución
 
@@ -133,7 +139,10 @@ Este microservicio:
   generados desde los contratos OpenAPI oficiales que entregó el docente — nunca se
   hardcodeó una llamada manual a ninguno de los dos.
 - **No expone las API keys** a ningún otro componente: se inyectan solo como variables de
-  entorno al arrancar este microservicio (`BANK_API_KEY`, `ERP_API_KEY`), nunca se commitean.
+  entorno al arrancar este microservicio (`BANK_API_KEY`, `ERP_API_KEY`), nunca se commitean. Lo mismo
+  aplica a las credenciales de AWS (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_REGION`) usadas por el cliente de DynamoDB: se resuelven en tiempo de ejecución vía
+  `DefaultCredentialsProvider` (variables de entorno), nunca hardcodeadas ni commiteadas.
 - **Una tabla de seguimiento separada (`envios_banco`) en vez de sobrecargar `pagos`**: se
   decidió así para poder registrar un intento por cada destino (banco y ERP) sin mezclar esa
   información de control con los datos propios del pago.
@@ -184,7 +193,7 @@ por la opción más honesta con los datos disponibles: una sola línea con
 
 ### 2.4 Instrucciones para probar el módulo
 
-**Requisitos previos:** JDK 25, Maven 3.9+, Docker (para RabbitMQ), y una base de datos
+**Requisitos previos:** JDK 21+ instalado (el proyecto compila a bytecode Java 21 vía `<java.version>21</java.version>` en el `pom.xml` — se probó corriendo tanto con JDK 21 como con JDK 25 instalado; **ojo:** compilar a bytecode de Java 25 rompe la lectura de anotaciones de Spring/Feign en esta versión de Spring Boot, así que no se recomienda subir ese valor), Maven 3.9+, Docker (para RabbitMQ), y una base de datos
 MariaDB/MySQL local con el esquema de AQUORA ya restaurado (`oficina_agua_db`).
 
 **1. Preparar la base de datos** — ejecutar, en este orden, contra `oficina_agua_db`:
@@ -214,7 +223,14 @@ export BANK_API_KEY="<api-key-real-del-banco>"
 export ERP_BASE_URL="https://<api-id>.execute-api.us-east-1.amazonaws.com/prod"
 export ERP_API_KEY="<api-key-real-del-erp>"
 export TEAM_CODE="EQUIPO_A"
+export AWS_ACCESS_KEY_ID="<access-key-del-usuario-IAM-pagos-externos-dynamodb>"
+export AWS_SECRET_ACCESS_KEY="<secret-key-correspondiente>"
+export AWS_REGION="us-east-2"
 ```
+
+> La tabla `pagos_envio_logs` debe existir previamente en DynamoDB (región `us-east-2`),
+> con `pagoId` (Number) como partition key y `timestamp` (String) como sort key. El usuario
+> IAM necesita el permiso `AmazonDynamoDBFullAccess` (o al menos `PutItem` sobre esa tabla).
 
 **4. Arrancar la aplicación** (en la misma terminal donde se definieron esas variables):
 
@@ -245,27 +261,21 @@ ante fallos transitorios, el pago queda `fallido`. En la tabla `envios_banco` de
 una con su propio `estado`, `intentos`, y (si tuvo éxito) el comprobante real devuelto por
 ese sistema (`receipt_id` del banco, número de comprobante del ERP).
 
-> La integración con el banco ya se verificó en vivo contra su API real: un pago recibió
-> primero un `500` (reintentable), el sistema lo reintentó automáticamente, y en el segundo
-> intento el banco respondió `201` con un recibo real. La integración con el ERP (agregada
-> una vez que el docente entregó su contrato oficial, junto con el del banco, el 8/10)
-> compila limpio contra JDK 25 y sigue exactamente el mismo patrón ya probado del banco;
-> la prueba en vivo contra la API real del ERP queda pendiente de confirmar antes de la
-> entrega final (ver sección 2.5).
+> La integración con el banco y con el ERP ya se verificó en vivo contra sus APIs reales: un
+> pago reenviado recibió `409` de ambos sistemas (el banco con `DUPLICATE_PAYMENT`, el ERP con
+> su equivalente), clasificado correctamente como éxito, con `envios_banco` quedando en
+> `exitoso` para `BANCO` y `ERP` (con su `receipt_id`/comprobante real) y el pago pasando a
+> `enviado`. El log de cada intento (éxito y reintentos previos) también quedó registrado en
+> DynamoDB (`pagos_envio_logs`), confirmando el flujo completo de punta a punta.
 
 ### 2.5 Pendientes conocidos
 
-- **Prueba en vivo de la integración con el ERP**: el código compila y sigue el mismo patrón
-  ya verificado del banco, pero aún no se confirmó una ejecución real contra la API del ERP
-  (insertar un pago, ver `201`/reintento, y la fila correspondiente en `envios_banco` con
-  `banco = 'ERP'`). Hacerlo antes de la entrega final.
 - `payer.taxId` (banco) no se envía porque la tabla `clientes` de AQUORA no tiene columna de
   NIT — es un campo opcional en el contrato del banco, así que no bloquea el envío. Lo mismo
   aplica a `contribuyente.nit` en el ERP.
 - El campo `forma_pago` del ERP (y `channel` del banco) no tienen un valor exacto para el
   método de pago `"deposito"` de AQUORA — se mapea a `TRANSFERENCIA`/`CARD` como la opción
-  más cercana, pendiente de confirmar con el docente (sección 10, pregunta 4 de la guía
-  original del banco).
+  más cercana
 - Queda un archivo legado `BancoSimulado.java` sin usar, de la primera versión de este
   módulo (antes de conectar con el banco real); no se elimina en esta entrega para no
   arriesgar el historial de commits, pero ya no es parte del flujo activo.

@@ -19,7 +19,7 @@
     <description>Feature 3 - Envio de pagos a sistemas externos (Fase 2)</description>
 
     <properties>
-        <java.version>25</java.version>
+        <java.version>21</java.version>
         <!-- BOM de Spring Cloud compatible con Spring Boot 3.5.x -->
         <spring-cloud.version>2025.0.0</spring-cloud.version>
         <!-- Version del plugin usada en la Clase 11 -->
@@ -93,7 +93,16 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-    </dependencies>
+        
+        <!-- dependencia para dynamodb en aws -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dynamodb</artifactId>
+            <version>2.28.11</version>
+        </dependency> 
+
+    
+    </dependencies> 
 
     <build>
         <plugins>
